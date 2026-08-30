@@ -200,9 +200,10 @@
 <script>
 "use strict";
 /* ================= バージョン ================= */
-const APP_VERSION = "v1.0.0";
-const APP_DATE    = "2026-08-26";
+const APP_VERSION = "v1.1.0";
+const APP_DATE    = "2026-08-30";
 const CHANGELOG = [
+  ["v1.1.0","2026-08-30","判定を語単位に変更。文で読んだとき、正しく言えていても『別の語に聞こえました』になっていた不具合を修正。同じ理由で効かなくなっていた誤認の検出も文の中で働くようにした。confused に狙いの語自身が入っていた場合は無視する"],
   ["v1.0.0","2026-08-26","初版：練習セットの貼り付け、音声認識による『意図した語に聞こえたか』の判定、誤認先の指摘、Obsidianへの追記に対応"],
 ];
 
@@ -414,6 +415,16 @@ function normalize(s){
     .replace(/\s+/g," ").trim();
 }
 
+/* 認識結果の中に、その語（または語句）が語単位で含まれるか。
+   文で読むと認識結果は文全体で返るので、完全一致では判定できない。
+   "the batter hit a foul tip" の中の "batter" を拾うためのもの。
+   部分文字列では見ないので、"bat" が "batter" に一致することはない。 */
+function containsWord(hay, needle){
+  if(!hay || !needle) return false;
+  const esc = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp("(^|\\s)" + esc + "($|\\s)").test(hay);
+}
+
 $("micBtn").onclick = ()=>{
   if(recognizing){ try{ recog.stop(); }catch(e){} return; }
   if(!canRecognize) return;
@@ -474,10 +485,15 @@ function judge(it, alts){
   const normAlts = alts.map(normalize);
   r.heard = alts[0];
 
+  // 文で読んだ場合、認識結果は文全体で返る。単語との完全一致では判定できないので
+  // 「その語が語単位で入っているか」で見る。単語だけ言ったときも同じ式で通る。
+  const inTop = containsWord(top, target);
+  const inAny = normAlts.some(a => containsWord(a, target));
+
   const v = $("verdict");
   v.classList.remove("hidden","ok","near","ng");
 
-  if(top === target){
+  if(inTop){
     r.ok = true; r.near = false; r.confusedHit = "";
     v.classList.add("verdict","ok");
     v.innerHTML = '<div class="head">◎ 通じました</div>'
@@ -489,19 +505,23 @@ function judge(it, alts){
   }
 
   // 誤認されやすい語に化けたか
-  const hit = (it.confused||[]).find(c => normAlts.includes(normalize(c)));
-  if(hit){
-    r.ok = false; r.confusedHit = hit;
+  // 自分自身を confused に書いてしまっている練習セットがあるので、target と同じものは除く
+  const conf = (it.confused||[]).map(normalize).filter(c => c && c !== target);
+  const hitTop = conf.find(c => containsWord(top, c));
+  const hitAny = hitTop || conf.find(c => normAlts.some(a => containsWord(a, c)));
+  if(hitAny){
+    r.ok = false; r.confusedHit = hitAny;
     v.classList.add("verdict","ng");
-    v.innerHTML = '<div class="head">✗ 「'+escapeHtml(hit)+'」に聞こえています</div>'
+    v.innerHTML = '<div class="head">✗ 「'+escapeHtml(hitAny)+'」に聞こえています</div>'
       + '狙い <span class="heard">'+escapeHtml(it.word)+'</span> → 認識 <span class="heard">'+escapeHtml(alts[0])+'</span>'
+      + (hitTop ? '' : '<br><span style="font-size:12px">（第1候補ではなく、ほかの候補に出ました。1回では断定できません）</span>')
       + (it.tip ? '<br><br>💡 '+it.tip : '')
       + '<br><br>お手本を聞いてから、もう一度どうぞ。';
     return;
   }
 
   // 候補のどこかに入っていたか
-  if(normAlts.includes(target)){
+  if(inAny){
     r.near = true;
     v.classList.add("verdict","near");
     v.innerHTML = '<div class="head">△ 惜しい</div>'
