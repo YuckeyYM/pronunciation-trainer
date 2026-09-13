@@ -123,6 +123,7 @@
     <button class="plain" id="quitBtn">中断して結果を見る</button>
   </div>
   <div class="status" id="drillStatus"></div>
+  <div class="status" id="diagBox" style="opacity:.65;font-size:.85em"></div>
 </div>
 
 <!-- ========== 結果 ========== -->
@@ -200,9 +201,10 @@
 <script>
 "use strict";
 /* ================= バージョン ================= */
-const APP_VERSION = "v1.1.0";
+const APP_VERSION = "v1.2.0";
 const APP_DATE    = "2026-08-30";
 const CHANGELOG = [
+  ["v1.2.0","2026-09-13","認識前にマイクを明示的に取得し、読み上げ中の音声を止めてから録音するようにした（iOSで読み上げ直後に認識できなくなる問題への対処）。認識のどこまで進んだかを画面に表示。8秒で自動停止。結果が返らなかった場合にメッセージを出すようにした。ハイフン・アポストロフィ・数字の表記ゆれで誤判定していたのを修正"],
   ["v1.1.0","2026-08-30","判定を語単位に変更。文で読んだとき、正しく言えていても『別の語に聞こえました』になっていた不具合を修正。同じ理由で効かなくなっていた誤認の検出も文の中で働くようにした。confused に狙いの語自身が入っていた場合は無視する"],
   ["v1.0.0","2026-08-26","初版：練習セットの貼り付け、音声認識による『意図した語に聞こえたか』の判定、誤認先の指摘、Obsidianへの追記に対応"],
 ];
@@ -236,6 +238,9 @@ let results = [];      // {word, types, ok, near, heard, confusedHit, attempts}
 let attempts = 0;      // 今の語の試行回数
 let recognizing = false;
 let recog = null;
+let recTimer = null;
+let diag = [];
+function dlog(s){ diag.push(s); const el=document.getElementById('diagBox'); if(el) el.textContent = diag.join(' \u2192 '); }
 
 /* ================= 貼り付け ================= */
 const SAMPLE = {
@@ -409,10 +414,15 @@ $("listenBtn").onclick = ()=>{
 };
 
 /* ================= 音声認識 ================= */
+const NUMWORDS = {"0":"zero","1":"one","2":"two","3":"three","4":"four","5":"five",
+  "6":"six","7":"seven","8":"eight","9":"nine","10":"ten","11":"eleven","12":"twelve"};
 function normalize(s){
-  return String(s||"").toLowerCase()
-    .replace(/[.,!?;:"'’]/g,"")
+  let t = String(s||"").toLowerCase()
+    .replace(/[’']/g,"")
+    .replace(/[-–—]/g," ")
+    .replace(/[.,!?;:"]/g,"")
     .replace(/\s+/g," ").trim();
+  return t.split(" ").map(w => NUMWORDS[w] || w).join(" ");
 }
 
 /* 認識結果の中に、その語（または語句）が語単位で含まれるか。
@@ -425,10 +435,32 @@ function containsWord(hay, needle){
   return new RegExp("(^|\\s)" + esc + "($|\\s)").test(hay);
 }
 
-$("micBtn").onclick = ()=>{
+async function ensureMic(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ dlog("getUserMedia\u306a\u3057"); return true; }
+  try{
+    const s = await navigator.mediaDevices.getUserMedia({audio:true});
+    s.getTracks().forEach(t=>t.stop());
+    dlog("\u30de\u30a4\u30af\u8a31\u53efOK");
+    return true;
+  }catch(e){
+    dlog("\u30de\u30a4\u30af\u5931\u6557:"+e.name);
+    $("drillStatus").textContent = "\u30de\u30a4\u30af\u3092\u4f7f\u3048\u307e\u305b\u3093\u3067\u3057\u305f\uff08"+e.name+"\uff09\u3002\u30d6\u30e9\u30a6\u30b6\u306e\u30de\u30a4\u30af\u8a31\u53ef\u3092\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002";
+    return false;
+  }
+}
+
+$("micBtn").onclick = async ()=>{
   if(recognizing){ try{ recog.stop(); }catch(e){} return; }
   if(!canRecognize) return;
-  startRecognition();
+  if(navigator.onLine === false){
+    $("drillStatus").textContent = "\u97f3\u58f0\u8a8d\u8b58\u306b\u306f\u30cd\u30c3\u30c8\u63a5\u7d9a\u304c\u5fc5\u8981\u3067\u3059\u3002\u30aa\u30d5\u30e9\u30a4\u30f3\u306e\u3088\u3046\u3067\u3059\u3002";
+    return;
+  }
+  diag = []; dlog("\u958b\u59cb");
+  try{ speechSynthesis.cancel(); }catch(e){}
+  const ok = await ensureMic();
+  if(!ok) return;
+  setTimeout(startRecognition, 250);
 };
 
 function startRecognition(){
@@ -438,6 +470,10 @@ function startRecognition(){
   recog.interimResults = false;
   recog.maxAlternatives = 5;
   recog.continuous = false;
+  recog.onaudiostart  = ()=> dlog("\u30de\u30a4\u30af\u5165\u529b\u3042\u308a");
+  recog.onsoundstart  = ()=> dlog("\u97f3\u3092\u691c\u77e5");
+  recog.onspeechstart = ()=> dlog("\u767a\u8a71\u3092\u691c\u77e5");
+  recog.onspeechend   = ()=> dlog("\u767a\u8a71\u7d42\u4e86");
 
   let got = null;
   recognizing = true;
@@ -463,12 +499,23 @@ function startRecognition(){
   };
   recog.onend = () => {
     recognizing = false;
+    clearTimeout(recTimer);
+    recog = null;
     $("micBtn").textContent = "🎤 もう一度話す";
     $("micBtn").classList.remove("rec");
     $("micLabel").textContent = "";
-    if(got) judge(it, got);
+    if(got){ dlog("結果あり"); judge(it, got); }
+    else {
+      dlog("結果なし");
+      if(!$("drillStatus").textContent){
+        $("drillStatus").textContent = "音は届きましたが、語として認識されませんでした。少し間を置いて、はっきり1語だけ言ってみてください。";
+      }
+    }
   };
-  try{ recog.start(); }
+  try{ recog.start();
+    clearTimeout(recTimer);
+    recTimer = setTimeout(()=>{ try{ if(recog) recog.stop(); }catch(e){} }, 8000);
+  }
   catch(err){
     recognizing = false;
     $("micBtn").classList.remove("rec");
